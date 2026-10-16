@@ -1,22 +1,27 @@
 --[[
-    AERIZ LOADER  -  github script picker
+    AERIZ LOADER  -  multi-game picker, single file
 
-    Setup
-      1. Save this as loader.lua in your repo root
-      2. Put your scripts in /scripts  (any .lua files)
-      3. Edit CONFIG below
-      4. Run:
-         loadstring(game:HttpGet("https://raw.githubusercontent.com/USER/REPO/main/loader.lua"))()
+    1. Save as loader.lua in your repo root
+    2. Make a folder per game with ONE .lua inside it
+    3. Edit GAMES + CONFIG below
+    4. Run:
+       loadstring(game:HttpGet("https://raw.githubusercontent.com/USER/REPO/main/loader.lua"))()
 ]]
 
 local CONFIG = {
     user   = "hxzy2k",
     repo   = "Aeriz-Hub",
     branch = "main",
-    dir    = "scripts",        -- folder your scripts live in
     title  = "Aeriz Loader",
     toggle = Enum.KeyCode.RightShift,
     accent = Color3.fromRGB(124, 92, 255),
+}
+
+-- game name, place id (for auto-detect), folder in the repo
+local GAMES = {
+    { name = "Murder Mystery 2", place = 142823291,   dir = "mm2"    },
+    { name = "Rivals",           place = 17625359962, dir = "rivals" },
+    -- { name = "Universal", place = 0, dir = "universal" },
 }
 
 --=====================================================================
@@ -24,13 +29,16 @@ local Players          = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
 local HttpService      = game:GetService("HttpService")
 local TweenService     = game:GetService("TweenService")
-local LocalPlayer      = Players.LocalPlayer
+
+local MY_PLACE    = game.PlaceId
+local MY_UNIVERSE = game.GameId
 
 local RAW = "https://raw.githubusercontent.com/%s/%s/%s/%s"
 local API = "https://api.github.com/repos/%s/%s/contents/%s?ref=%s"
 
-local listing = {}          -- cache, so we do not hammer the api
-local lastGood = nil        -- last successful path
+local listing = {}
+local currentGame = nil
+local view = "games"
 
 --=====================================================================
 -- http
@@ -57,6 +65,16 @@ local function rawURL(path)
     return string.format(RAW, CONFIG.user, CONFIG.repo, CONFIG.branch, urlEncode(path))
 end
 
+local function apiList(path)
+    local url = string.format(API, CONFIG.user, CONFIG.repo, urlEncode(path), CONFIG.branch)
+    local ok, body = pcall(httpGet, url)
+    if not ok or not body then return nil, "request failed" end
+    local ok2, data = pcall(function() return HttpService:JSONDecode(body) end)
+    if not ok2 or type(data) ~= "table" then return nil, "bad response" end
+    if data.message then return nil, data.message end
+    return data
+end
+
 --=====================================================================
 -- ui
 --=====================================================================
@@ -76,8 +94,8 @@ gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 gui.Parent = guiParent()
 
 local win = Instance.new("Frame")
-win.Size = UDim2.fromOffset(380, 460)
-win.Position = UDim2.new(0.5, -190, 0.5, -230)
+win.Size = UDim2.fromOffset(390, 470)
+win.Position = UDim2.new(0.5, -195, 0.5, -235)
 win.BackgroundColor3 = Color3.fromRGB(26, 26, 32)
 win.BorderSizePixel = 0
 win.Parent = gui
@@ -111,10 +129,11 @@ Instance.new("UICorner", dot).CornerRadius = UDim.new(1, 0)
 local titleLbl = Instance.new("TextLabel")
 titleLbl.BackgroundTransparency = 1
 titleLbl.Position = UDim2.new(0, 30, 0, 0)
-titleLbl.Size = UDim2.new(1, -80, 1, 0)
+titleLbl.Size = UDim2.new(1, -140, 1, 0)
 titleLbl.Font = Enum.Font.GothamBold
-titleLbl.TextSize = 14
+titleLbl.TextSize = 13
 titleLbl.TextXAlignment = Enum.TextXAlignment.Left
+titleLbl.TextTruncate = Enum.TextTruncate.AtEnd
 titleLbl.TextColor3 = Color3.fromRGB(235, 235, 245)
 titleLbl.Text = CONFIG.title
 titleLbl.Parent = header
@@ -142,6 +161,13 @@ local function headerBtn(text, xOff, cb)
     return b
 end
 
+local backBtn = headerBtn("‹", -98, function()
+    if view == "scripts" then
+        view = "games"
+        currentGame = nil
+        render()
+    end
+end)
 headerBtn("–", -68, function() win.Visible = false end)
 headerBtn("×", -38, function() gui:Destroy() end)
 
@@ -242,7 +268,8 @@ local function clearList()
     end
 end
 
-local function addRow(name, isFolder, onOpen, onCopy)
+local function addRow(name, opts)
+    opts = opts or {}
     local row = Instance.new("Frame")
     row.Size = UDim2.new(1, -6, 0, 38)
     row.BackgroundColor3 = Color3.fromRGB(33, 33, 41)
@@ -251,7 +278,7 @@ local function addRow(name, isFolder, onOpen, onCopy)
     Instance.new("UICorner", row).CornerRadius = UDim.new(0, 7)
 
     local btn = Instance.new("TextButton")
-    btn.Size = UDim2.new(1, onCopy and -42 or -12, 1, 0)
+    btn.Size = UDim2.new(1, opts.onCopy and -42 or -12, 1, 0)
     btn.Position = UDim2.new(0, 6, 0, 0)
     btn.BackgroundTransparency = 1
     btn.Font = Enum.Font.GothamMedium
@@ -259,7 +286,7 @@ local function addRow(name, isFolder, onOpen, onCopy)
     btn.TextXAlignment = Enum.TextXAlignment.Left
     btn.TextColor3 = Color3.fromRGB(225, 225, 235)
     btn.TextTruncate = Enum.TextTruncate.AtEnd
-    btn.Text = (isFolder and "> " or "") .. name
+    btn.Text = name
     btn.AutoButtonColor = false
     btn.Parent = row
 
@@ -280,9 +307,9 @@ local function addRow(name, isFolder, onOpen, onCopy)
         hover.BackgroundTransparency = 1
         TweenService:Create(row, TweenInfo.new(0.12), { BackgroundColor3 = Color3.fromRGB(33, 33, 41) }):Play()
     end)
-    btn.MouseButton1Click:Connect(onOpen)
+    btn.MouseButton1Click:Connect(function() if opts.onClick then opts.onClick() end end)
 
-    if onCopy then
+    if opts.onCopy then
         local cp = Instance.new("TextButton")
         cp.Size = UDim2.fromOffset(26, 26)
         cp.Position = UDim2.new(1, -32, 0.5, -13)
@@ -295,14 +322,14 @@ local function addRow(name, isFolder, onOpen, onCopy)
         cp.AutoButtonColor = false
         cp.Parent = row
         Instance.new("UICorner", cp).CornerRadius = UDim.new(0, 6)
-        cp.MouseButton1Click:Connect(onCopy)
+        cp.MouseButton1Click:Connect(function() if opts.onCopy then opts.onCopy() end end)
     end
 
     return row
 end
 
 --=====================================================================
--- running
+-- run
 --=====================================================================
 local function runScript(path, url)
     status("fetching " .. path .. "...", CONFIG.accent)
@@ -310,124 +337,153 @@ local function runScript(path, url)
     if not ok or not body or body == "" then
         return status("http failed: " .. tostring(body), Color3.fromRGB(240, 90, 90))
     end
-
     local loader = loadstring or load
     local chunk, err = loader(body, "@" .. path)
     if not chunk then
         return status("syntax error: " .. tostring(err), Color3.fromRGB(240, 90, 90))
     end
-
     local ok2, err2 = pcall(chunk)
     if not ok2 then
         return status("runtime error: " .. tostring(err2), Color3.fromRGB(240, 90, 90))
     end
-
-    lastGood = path
     status("loaded " .. path, Color3.fromRGB(90, 220, 140))
 end
 
 --=====================================================================
--- listing
+-- views
 --=====================================================================
-local function apiList(path)
-    local url = string.format(API, CONFIG.user, CONFIG.repo, urlEncode(path), CONFIG.branch)
-    local ok, body = pcall(httpGet, url)
-    if not ok or not body then return nil, "request failed" end
-    local ok2, data = pcall(function() return HttpService:JSONDecode(body) end)
-    if not ok2 or type(data) ~= "table" then return nil, "bad response" end
-    if data.message then return nil, data.message end
-    return data
-end
-
-local currentDir = CONFIG.dir
 local render
 
-local function renderList()
+local function renderGames()
     clearList()
+    backBtn.Visible = false
+    titleLbl.Text = CONFIG.title
+
     local filter = string.lower(search.Text)
-    local entries = listing[currentDir]
-    if not entries then return end
+    local detected
+    for _, g in ipairs(GAMES) do
+        if g.place and g.place ~= 0 and (g.place == MY_PLACE or g.place == MY_UNIVERSE) then
+            detected = g
+            break
+        end
+    end
+
+    local ordered = {}
+    for _, g in ipairs(GAMES) do table.insert(ordered, g) end
+    table.sort(ordered, function(a, b)
+        if (a == detected) ~= (b == detected) then return a == detected end
+        return string.lower(a.name) < string.lower(b.name)
+    end)
 
     local shown = 0
-    for _, e in ipairs(entries) do
+    for _, g in ipairs(ordered) do
+        if filter == "" or string.find(string.lower(g.name), filter, 1, true) then
+            shown = shown + 1
+            local label = g.name
+            if g == detected then label = "● " .. g.name .. "   (you are here)" end
+            addRow(label, {
+                onClick = function()
+                    currentGame = g
+                    view = "scripts"
+                    search.Text = ""
+                    render()
+                end,
+            })
+        end
+    end
+
+    if shown == 0 then addRow("no games", {}) end
+
+    if detected then
+        status("detected: " .. detected.name, Color3.fromRGB(90, 220, 140))
+    else
+        status(#GAMES .. " games  -  pick one")
+    end
+end
+
+local function renderScripts()
+    clearList()
+    backBtn.Visible = true
+    titleLbl.Text = CONFIG.title .. "  /  " .. currentGame.name
+
+    local dir = currentGame.dir
+    local cached = listing[dir]
+
+    if not cached then
+        status("listing " .. dir .. "...", CONFIG.accent)
+        task.spawn(function()
+            local data, err = apiList(dir)
+            if not data then
+                status("api: " .. tostring(err), Color3.fromRGB(240, 190, 90))
+                return
+            end
+            local out = {}
+            for _, f in ipairs(data) do
+                if f.type == "file" and f.name:match("%.luau?$") then
+                    table.insert(out, { name = f.name, path = f.path, download = f.download_url })
+                elseif f.type == "dir" then
+                    table.insert(out, { name = f.name, path = f.path, isFolder = true })
+                end
+            end
+            table.sort(out, function(a, b)
+                if a.isFolder ~= b.isFolder then return a.isFolder end
+                return string.lower(a.name) < string.lower(b.name)
+            end)
+            listing[dir] = out
+            render()
+        end)
+        return
+    end
+
+    local filter = string.lower(search.Text)
+    local shown = 0
+    for _, e in ipairs(cached) do
         if filter == "" or string.find(string.lower(e.name), filter, 1, true) then
             shown = shown + 1
             if e.isFolder then
-                addRow(e.name, true, function()
-                    currentDir = e.path
-                    status("opening " .. e.path)
-                    render()
-                end)
+                addRow("> " .. e.name, {
+                    onClick = function()
+                        currentGame.dir = e.path
+                        render()
+                    end,
+                })
             else
-                addRow(e.name, false,
-                    function() runScript(e.path, e.download) end,
-                    function()
+                addRow(e.name, {
+                    onClick = function() runScript(e.path, e.download) end,
+                    onCopy = function()
                         if setclipboard then
-                            setclipboard(string.format(
-                                'loadstring(game:HttpGet("%s"))()',
+                            setclipboard(string.format('loadstring(game:HttpGet("%s"))()',
                                 e.download or rawURL(e.path)))
                             status("copied loadstring for " .. e.name, CONFIG.accent)
-                        else
-                            status("no setclipboard in this executor")
                         end
-                    end)
+                    end,
+                })
             end
         end
     end
 
-    if currentDir ~= CONFIG.dir then
-        local back = addRow("..  (back)", true, function()
-            currentDir = currentDir:match("^(.*)/") or CONFIG.dir
-            if #currentDir < #CONFIG.dir then currentDir = CONFIG.dir end
-            render()
-        end)
-        back.LayoutOrder = -1
-    end
-
-    if shown == 0 then
-        addRow(filter == "" and "folder is empty" or "no matches", false, function() end)
-    end
+    if shown == 0 then addRow("folder is empty", {}) end
+    status(#cached .. " entries in " .. dir)
 end
 
-function render(force)
-    if listing[currentDir] and not force then return renderList() end
-
-    status("listing " .. currentDir .. "...", CONFIG.accent)
-    task.spawn(function()
-        local data, err = apiList(currentDir)
-        if not data then
-            status("api: " .. tostring(err) .. "  (add manifest.json?)", Color3.fromRGB(240, 190, 90))
-            return
-        end
-
-        local out = {}
-        for _, f in ipairs(data) do
-            if f.type == "dir" then
-                table.insert(out, { name = f.name, path = f.path, isFolder = true })
-            elseif f.type == "file" and f.name:match("%.luau?$") then
-                table.insert(out, { name = f.name, path = f.path, download = f.download_url })
-            end
-        end
-        table.sort(out, function(a, b)
-            if a.isFolder ~= b.isFolder then return a.isFolder end
-            return string.lower(a.name) < string.lower(b.name)
-        end)
-
-        listing[currentDir] = out
-        status(#out .. " entries in " .. currentDir)
-        renderList()
-    end)
+function render()
+    if view == "games" then renderGames() else renderScripts() end
 end
 
 --=====================================================================
--- init
+-- boot
 --=====================================================================
-search:GetPropertyChangedSignal("Text"):Connect(function() renderList() end)
+search:GetPropertyChangedSignal("Text"):Connect(function() render() end)
 
-task.spawn(function()
-    task.wait(0.2)
-    render()
-end)
+for _, g in ipairs(GAMES) do
+    if g.place and g.place ~= 0 and (g.place == MY_PLACE or g.place == MY_UNIVERSE) then
+        currentGame = g
+        view = "scripts"
+        break
+    end
+end
+
+render()
 
 UserInputService.InputBegan:Connect(function(input, gp)
     if gp then return end
@@ -435,5 +491,3 @@ UserInputService.InputBegan:Connect(function(input, gp)
         win.Visible = not win.Visible
     end
 end)
-
-status("running  -  " .. CONFIG.user .. "/" .. CONFIG.repo)
